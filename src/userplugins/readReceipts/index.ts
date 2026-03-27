@@ -6,13 +6,7 @@
 
 import { addMessagePreSendListener, MessageSendListener, removeMessagePreSendListener } from "@api/MessageEvents";
 import { definePluginSettings } from "@api/Settings";
-import { Logger } from "@utils/Logger";
 import definePlugin, { OptionType } from "@utils/types";
-import { Constants, FluxDispatcher, RestAPI, UserStore } from "@webpack/common";
-
-const SUPPRESS_EMBEDS = 1 << 2;
-const trackingLinkPattern = / \[\uFE00\]\([^)]+\)/;
-const logger = new Logger("ReadReceipts");
 
 const settings = definePluginSettings({
     baseLink: {
@@ -35,20 +29,6 @@ const settings = definePluginSettings({
     }
 });
 
-function suppressEmbedsForTrackedMessage(event: any) {
-    if (!event?.message?.content || typeof event.message.content !== "string") return;
-
-    const currentUser = UserStore.getCurrentUser();
-    if (!currentUser || event.message.author?.id !== currentUser.id) return;
-
-    if (trackingLinkPattern.test(event.message.content)) {
-        RestAPI.patch({
-            url: Constants.Endpoints.MESSAGE(event.message.channel_id, event.message.id),
-            body: { flags: (event.message.flags ?? 0) | SUPPRESS_EMBEDS }
-        }).catch(e => logger.error("Failed to suppress embeds", e));
-    }
-}
-
 let preSendListener: MessageSendListener;
 
 export default definePlugin({
@@ -56,6 +36,19 @@ export default definePlugin({
     description: "Appends a hidden read receipt link to messages.",
     authors: [{ name: "GCMarvin", id: 210406005245345792n }],
     settings,
+
+    patches: [{
+        find: "renderEmbeds(",
+        replacement: {
+            match: /(?<=renderEmbeds\(\i\){.{0,500}embeds\.map\(\((\i),\i\)?=>{)/,
+            replace: "$&if($self.isTrackingEmbed($1))return null;"
+        }
+    }],
+
+    isTrackingEmbed(embed: any) {
+        const baseLink = settings.store.baseLink.replace(/\/+$/, "");
+        return embed?.url?.startsWith(baseLink);
+    },
 
     start() {
         preSendListener = addMessagePreSendListener((_channelId, messageObj, options) => {
@@ -72,12 +65,9 @@ export default definePlugin({
                 messageObj.content += ` [\uFE00](${cleanLink}/${uuid})`;
             }
         });
-
-        FluxDispatcher.subscribe("MESSAGE_CREATE", suppressEmbedsForTrackedMessage);
     },
 
     stop() {
         removeMessagePreSendListener(preSendListener);
-        FluxDispatcher.unsubscribe("MESSAGE_CREATE", suppressEmbedsForTrackedMessage);
     }
 });
