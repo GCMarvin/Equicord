@@ -7,6 +7,7 @@
 import { addMessagePreSendListener, MessageSendListener, removeMessagePreSendListener } from "@api/MessageEvents";
 import { definePluginSettings } from "@api/Settings";
 import definePlugin, { OptionType } from "@utils/types";
+import { FluxDispatcher, UserStore } from "@webpack/common";
 
 const settings = definePluginSettings({
     baseLink: {
@@ -29,26 +30,35 @@ const settings = definePluginSettings({
     }
 });
 
+function stripOwnTrackingLink(event: any) {
+    const { message } = event;
+    if (!message?.content || typeof message.content !== "string") return;
+
+    const currentUser = UserStore.getCurrentUser();
+    if (!currentUser || message.author?.id !== currentUser.id) return;
+
+    const baseLink = settings.store.baseLink.replace(/\/+$/, "");
+    if (!baseLink) return;
+
+    const escaped = baseLink.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const pattern = new RegExp(` \\[\uFE00\\]\\(${escaped}/[^)]+\\)`);
+    message.content = message.content.replace(pattern, "");
+
+    if (message.embeds?.length) {
+        message.embeds = message.embeds.filter(
+            (e: any) => !e?.url?.startsWith(baseLink)
+        );
+    }
+}
+
 let preSendListener: MessageSendListener;
+let origDispatch: typeof FluxDispatcher.dispatch;
 
 export default definePlugin({
     name: "ReadReceipts",
     description: "Appends a hidden read receipt link to messages.",
     authors: [{ name: "GCMarvin", id: 210406005245345792n }],
     settings,
-
-    patches: [{
-        find: "renderEmbeds(",
-        replacement: {
-            match: /(?<=renderEmbeds\(\i\){.{0,500}embeds\.map\(\((\i),\i\)?=>{)/,
-            replace: "$&if($self.isTrackingEmbed($1))return null;"
-        }
-    }],
-
-    isTrackingEmbed(embed: any) {
-        const baseLink = settings.store.baseLink.replace(/\/+$/, "");
-        return embed?.url?.startsWith(baseLink);
-    },
 
     start() {
         preSendListener = addMessagePreSendListener((_channelId, messageObj, options) => {
@@ -65,9 +75,18 @@ export default definePlugin({
                 messageObj.content += ` [\uFE00](${cleanLink}/${uuid})`;
             }
         });
+
+        origDispatch = FluxDispatcher.dispatch;
+        FluxDispatcher.dispatch = function (event: any) {
+            if ((event.type === "MESSAGE_CREATE" || event.type === "MESSAGE_UPDATE") && event.message) {
+                stripOwnTrackingLink(event);
+            }
+            return origDispatch.call(this, event);
+        };
     },
 
     stop() {
         removeMessagePreSendListener(preSendListener);
+        FluxDispatcher.dispatch = origDispatch;
     }
 });
